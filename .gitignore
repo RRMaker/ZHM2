@@ -207,4 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 static/outputs/
+<<<<<<< HEAD
 .DS_Store
+=======
+>>>>>>> c62f21dc531a31015bb1b39d5be053dfb8a470a8
