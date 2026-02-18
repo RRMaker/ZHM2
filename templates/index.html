@@ -74,18 +74,21 @@
       <p>Fish mask:</p>
       <img
         src="{{ url_for('static', filename='outputs/' ~ fish_mask_image) }}"
-        style="max-width:100%;"
+        class="debug-image"
         alt="Fish mask"
       >
+
+
     {% endif %}
 
     {% if red_mask_image %}
       <p>Red mask (inside fish):</p>
       <img
         src="{{ url_for('static', filename='outputs/' ~ red_mask_image) }}"
-        style="max-width:100%;"
-        alt="Red mask inside fish"
+        class="debug-image"
+        alt="Bleed mask"
       >
+
     {% endif %}
 
   </div>
