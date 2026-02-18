@@ -1,0 +1,236 @@
+/* ===== GLOBAL RESET ===== */
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+
+  background: linear-gradient(
+    to bottom,
+    #000000 0%,
+    #0a0614 50%,
+    #1b1230 90%,
+    #24163f 100%
+  );
+  background-attachment: fixed;
+
+  color: #e6e6eb;
+}
+
+/* Center the page content nicely */
+body {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+/* Page container */
+.container {
+  width: 100%;
+  max-width: 900px;
+
+  margin: 40px 16px;      /* 16px side padding on small screens */
+  padding: 40px;
+
+  background: #111116;
+  border-radius: 12px;
+
+  box-shadow:
+    0 30px 60px rgba(0, 0, 0, 0.25),
+    0 10px 20px rgba(0, 0, 0, 0.15);
+
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .container {
+    padding: 24px;
+    margin: 24px 12px;
+  }
+}
+
+/* ===== UPLOAD SECTION ===== */
+.upload-heading {
+  margin: 0 0 30px 0;
+}
+
+.upload-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+}
+
+/* Upload card */
+.upload-card {
+  width: 100%;
+  max-width: 720px;
+  height: 280px;
+
+  border-radius: 16px;
+  border: 2px dashed rgba(255, 255, 255, 0.2);
+
+  background: linear-gradient(
+    135deg,
+    rgba(37, 99, 235, 0.12),
+    rgba(139, 92, 246, 0.12)
+  );
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  cursor: pointer;
+  user-select: none;
+
+  transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.upload-card:hover {
+  border-color: rgba(139, 92, 246, 0.6);
+  background: linear-gradient(
+    135deg,
+    rgba(37, 99, 235, 0.18),
+    rgba(139, 92, 246, 0.18)
+  );
+  transform: translateY(-2px);
+}
+
+/* Placeholder content */
+#upload-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+}
+
+.upload-icon {
+  font-size: 42px;
+  color: #8b5cf6;
+}
+
+.upload-text {
+  color: #e5e7eb;
+  font-size: 16px;
+  opacity: 0.9;
+}
+
+/* Preview image inside the card */
+#upload-preview {
+  display: none;          /* JS turns this on */
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 14px;
+}
+
+/* ===== BUTTON ===== */
+.trace-btn {
+  padding: 12px 18px;
+  background: #2563eb;
+  color: white;
+
+  border: none;
+  border-radius: 8px;
+
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.trace-btn:hover {
+  background: #1e40af;
+}
+
+.trace-btn:focus-visible {
+  outline: 2px solid rgba(139, 92, 246, 0.8);
+  outline-offset: 3px;
+}
+
+/* ===== OUTPUT ===== */
+.output-heading {
+  margin-top: 40px;
+  margin-bottom: 0;
+}
+
+.output-image {
+  margin-top: 20px;
+  max-width: 500px;
+  width: 100%;
+
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+/* ============================================================
+   NEW: Metrics + Debug Masks styling (fits your updated HTML)
+   ============================================================ */
+
+/* Generic "section card" look for results below the output */
+.metrics-panel,
+.debug-panel {
+  width: 100%;
+  max-width: 720px;
+
+  margin: 18px auto 0 auto;
+  padding: 18px 18px;
+
+  text-align: left;
+
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
+}
+
+/* Titles inside panels */
+.metrics-title,
+.debug-title {
+  margin: 0 0 10px 0;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+/* Metrics list */
+.metrics-list {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.6;
+  color: rgba(230, 230, 235, 0.95);
+}
+
+.metrics-list li {
+  margin: 6px 0;
+}
+
+/* Make the numbers stand out a bit */
+.metrics-list .value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+/* Debug mask images */
+.debug-img {
+  margin-top: 10px;
+  width: 100%;
+  max-width: 720px;
+
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.30);
+}
+
+/* Small captions above debug images */
+.debug-caption {
+  margin: 14px 0 6px 0;
+  font-size: 13px;
+  color: rgba(230, 230, 235, 0.80);
+}

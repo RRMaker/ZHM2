@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Zebrafish Tracer</title>
+
+  <!-- Link your CSS file -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+  <div class="container">
+
+    <h2 class="upload-heading">Upload Zebrafish Image</h2>
+
+    <form method="POST" enctype="multipart/form-data" class="upload-form">
+
+      <!-- Hidden file input -->
+      <input
+        id="image-input"
+        type="file"
+        name="image"
+        accept="image/*"
+        hidden
+        required
+        onchange="previewImage(event)"
+      >
+
+      <!-- Upload card -->
+      <div class="upload-card" onclick="document.getElementById('image-input').click()">
+
+        <!-- Placeholder -->
+        <div id="upload-placeholder">
+          <div class="upload-icon">⬆</div>
+          <div class="upload-text">Click to upload zebrafish image</div>
+        </div>
+
+        <!-- Preview -->
+        <img id="upload-preview" style="display:none;" alt="Uploaded preview">
+      </div>
+
+      <!-- Submit button -->
+      <button type="submit" class="trace-btn">
+        Trace Area
+      </button>
+
+    </form>
+
+    {% if output_image %}
+      <h3 class="output-heading">Traced Output</h3>
+
+      <img
+        src="{{ url_for('static', filename='outputs/' + output_image) }}"
+        class="output-image"
+        alt="Traced zebrafish output"
+      >
+    {% endif %}
+
+    <!-- ✅ Put these INSIDE the HTML/body/container -->
+    {% if metrics %}
+      <div style="text-align:left; margin-top:16px;">
+        <h3>Bleeding Metrics</h3>
+        <ul>
+          <li>Total_Fish_Pixel_Area: {{ metrics.total_fish_pixel_area }}</li>
+          <li>Red_Pixel_Area: {{ metrics.red_pixel_area }}</li>
+          <li>Mean_Red_Pixel_Intensity (V): {{ "%.2f"|format(metrics.mean_red_pixel_intensity) }}</li>
+          <li>Integrated_Density: {{ "%.2f"|format(metrics.integrated_density) }}</li>
+          <li>Bleeding_Index: {{ "%.6f"|format(metrics.bleeding_index) }}</li>
+        </ul>
+      </div>
+    {% endif %}
+
+    {% if fish_mask_image %}
+      <p>Fish mask:</p>
+      <img
+        src="{{ url_for('static', filename='outputs/' ~ fish_mask_image) }}"
+        style="max-width:100%;"
+        alt="Fish mask"
+      >
+    {% endif %}
+
+    {% if red_mask_image %}
+      <p>Red mask (inside fish):</p>
+      <img
+        src="{{ url_for('static', filename='outputs/' ~ red_mask_image) }}"
+        style="max-width:100%;"
+        alt="Red mask inside fish"
+      >
+    {% endif %}
+
+  </div>
+
+  <script>
+    function previewImage(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const preview = document.getElementById("upload-preview");
+      const placeholder = document.getElementById("upload-placeholder");
+
+      preview.src = URL.createObjectURL(file);
+      preview.style.display = "block";
+      placeholder.style.display = "none";
+    }
+  </script>
+
+</body>
+</html>
+
+
