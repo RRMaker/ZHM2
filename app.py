@@ -126,20 +126,6 @@ TAIL_RECOVER_V_MIN = 20
 TAIL_RECOVER_EDGE_DILATE = 3
 
 # -----------------------------
-# NEW: tiny tail-corner recovery
-# -----------------------------
-TAIL_CORNER_TINY_ENABLE = True
-TAIL_CORNER_TINY_ROI_DILATE = 8
-TAIL_CORNER_TINY_NEAR_DILATE = 10
-TAIL_CORNER_TINY_GROW_ITERS = 8
-TAIL_CORNER_TINY_CANNY1 = 2
-TAIL_CORNER_TINY_CANNY2 = 14
-TAIL_CORNER_TINY_S_MAX = 170
-TAIL_CORNER_TINY_V_MIN = 16
-TAIL_CORNER_TINY_BG_MIN = 8.0
-TAIL_CORNER_TINY_GRAD_MIN = 4.0
-
-# -----------------------------
 # Small boundary smoothing on mask
 # -----------------------------
 BOUNDARY_SMOOTH_ENABLE = True
@@ -164,6 +150,7 @@ LOCAL_MASK_POST_OPEN_K = 3
 # -----------------------------
 # contour edge refinement
 # -----------------------------
+# Turned off because it is the main source of small bumps/jagged snapping
 CONTOUR_EDGE_REFINE_ENABLE = False
 CONTOUR_REFINE_STEP_PX = 1.0
 CONTOUR_REFINE_SMOOTH_SIGMA = 2.5
@@ -551,60 +538,6 @@ def tail_recover_fullres(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarr
         add = cv2.bitwise_and(grow, candidate)
         add = cv2.bitwise_and(add, add, mask=roi)
         out = cv2.bitwise_or(out, add)
-
-    out = keep_largest_connected_component(out)
-    out = fill_mask_holes(out)
-    return out
-
-
-def recover_tiny_tail_corner(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarray:
-    """
-    Very narrow pass that tries to pull in the tiny missing tail-corner nub
-    without expanding the whole tail.
-    """
-    if (not TAIL_CORNER_TINY_ENABLE) or fish_mask is None or cv2.countNonZero(fish_mask) == 0:
-        return fish_mask
-
-    roi = _tail_corner_roi(fish_mask)
-    if roi is None or cv2.countNonZero(roi) == 0:
-        return fish_mask
-
-    d = int(max(1, TAIL_CORNER_TINY_ROI_DILATE))
-    k_roi = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * d + 1, 2 * d + 1))
-    roi = cv2.dilate(roi, k_roi, iterations=1)
-
-    hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
-    _, s, v = cv2.split(hsv)
-
-    boosted = super_boost_lines_gray(img_rgb)
-    grad = gradient_u8(boosted).astype(np.float32)
-    canny = cv2.Canny(boosted, int(TAIL_CORNER_TINY_CANNY1), int(TAIL_CORNER_TINY_CANNY2))
-    canny = cv2.dilate(canny, np.ones((3, 3), np.uint8), iterations=1)
-    bg_dist = compute_background_distance(img_rgb, border_px=12)
-
-    pale_tail = ((s <= int(TAIL_CORNER_TINY_S_MAX)) & (v >= int(TAIL_CORNER_TINY_V_MIN))).astype(np.uint8) * 255
-
-    candidate = (
-        ((pale_tail > 0) & (bg_dist >= float(TAIL_CORNER_TINY_BG_MIN)) & (grad >= float(TAIL_CORNER_TINY_GRAD_MIN)))
-        | ((pale_tail > 0) & (canny > 0))
-    ).astype(np.uint8) * 255
-
-    candidate = cv2.bitwise_and(candidate, roi)
-
-    near_px = int(max(1, TAIL_CORNER_TINY_NEAR_DILATE))
-    k_near = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * near_px + 1, 2 * near_px + 1))
-    near = cv2.dilate(fish_mask, k_near, iterations=1)
-    candidate = cv2.bitwise_and(candidate, near)
-
-    out = fish_mask.copy()
-    k3 = np.ones((3, 3), np.uint8)
-    for _ in range(int(max(1, TAIL_CORNER_TINY_GROW_ITERS))):
-        grow = cv2.dilate(out, k3, iterations=1)
-        add = cv2.bitwise_and(grow, candidate)
-        new_out = cv2.bitwise_or(out, add)
-        if cv2.countNonZero(new_out) == cv2.countNonZero(out):
-            break
-        out = new_out
 
     out = keep_largest_connected_component(out)
     out = fill_mask_holes(out)
@@ -1343,7 +1276,6 @@ def index():
         fish_mask_full = fill_mask_holes(fish_mask_full)
 
         fish_mask_full = tail_recover_fullres(img_rgb_full, fish_mask_full)
-        fish_mask_full = recover_tiny_tail_corner(img_rgb_full, fish_mask_full)
 
         if LOCAL_MASK_REFINE_ENABLE:
             fish_mask_full = local_band_refine_mask(img_rgb_full, fish_mask_full)
@@ -1371,6 +1303,8 @@ def index():
 
         best_contour = contour_from_mask(fish_mask_full)
 
+        # Smooth the final contour unconditionally so the displayed outline
+        # is continuous and less bumpy.
         if best_contour is not None and OUTLINE_SMOOTH_ENABLE:
             best_contour = smooth_contour_highres(
                 best_contour,
