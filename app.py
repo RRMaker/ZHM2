@@ -21,7 +21,7 @@ app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 # --- display knobs ---
-FISH_OUTLINE_THICKNESS = 10
+FISH_OUTLINE_THICKNESS = 5
 BLEED_EDGE_THICKNESS = 2
 
 # Fish-mask stability knobs
@@ -78,7 +78,7 @@ EDGE_GUIDED_GRAD_BONUS = 10
 
 # Tighten (small) then restore fins near edges
 TIGHTEN_ENABLE = True
-TIGHTEN_ERODE_PX = 1
+TIGHTEN_ERODE_PX = 0
 TIGHTEN_RESTORE_BAND_PX = 22
 TIGHTEN_EDGE_THR = 18
 
@@ -87,11 +87,10 @@ TIGHTEN_EDGE_THR = 18
 # -----------------------------
 OUTLINE_SMOOTH_ENABLE = True
 
-SMOOTH_TARGET_STEP_PX = 0.85
-SMOOTH_SIGMA = 3.6
-SMOOTH_PASSES = 5
+SMOOTH_TARGET_STEP_PX = 1.15
+SMOOTH_SIGMA = 5.2
+SMOOTH_PASSES = 7
 
-# Snapping can re-introduce bumps; keep OFF for smooth curve.
 OUTLINE_SNAP_ENABLE = False
 
 SAFE_SNAP_MIN_AREA_FRAC = 0.985
@@ -105,21 +104,21 @@ SNAP_MAX_MOVE_PX = 5
 # BIG SMOOTHING: Signed-distance smoothing
 # -----------------------------
 SDF_SMOOTH_ENABLE = True
-SDF_SIGMA = 6.0
+SDF_SIGMA = 3.8
 SDF_ITERS = 1
 
-# Stage A (slight expand helps tail) then Stage B tighten without losing smoothness
-SDF_LEVEL_STAGE_A = -0.35   # was looser; less expansion now
+# Keep smoothing mild so boundary stays close
+SDF_LEVEL_STAGE_A = -0.06
 FISH_TIGHTEN_ENABLE = True
-FISH_TIGHTEN_ERODE_PX = 1   # tighten fit
-SDF_LEVEL_STAGE_B = 0.25    # shrink a bit after erosion, keeps smoothness via re-SDF
+FISH_TIGHTEN_ERODE_PX = 0
+SDF_LEVEL_STAGE_B = 0.03
 
 # -----------------------------
 # Full-res tail recovery pass
 # -----------------------------
 TAIL_RECOVER_ENABLE = True
 TAIL_RECOVER_FRAC = 0.28
-TAIL_RECOVER_DILATE_ITERS = 5
+TAIL_RECOVER_DILATE_ITERS = 4
 TAIL_RECOVER_CANNY1 = 2
 TAIL_RECOVER_CANNY2 = 18
 TAIL_RECOVER_S_MAX = 140
@@ -134,11 +133,58 @@ BOUNDARY_SMOOTH_K = 3
 BOUNDARY_SMOOTH_ITERS = 1
 
 # -----------------------------
-# NEW: Red mask smoothing / better fit
+# NEW: local mask refinement
 # -----------------------------
-RED_MIN_COMPONENT_AREA = 25       # remove tiny red specks
+LOCAL_MASK_REFINE_ENABLE = True
+LOCAL_MASK_REFINE_ITERS = 3
+LOCAL_MASK_INNER_ERODE_PX = 10
+LOCAL_MASK_OUTER_DILATE_PX = 12
+LOCAL_MASK_OUTER_FIN_DILATE_PX = 24
+LOCAL_MASK_OUTER_TAIL_DILATE_PX = 30
+LOCAL_MASK_BG_THRESH = 30.0
+LOCAL_MASK_EDGE_THRESH = 12.0
+LOCAL_MASK_GRAD_THRESH = 10.0
+LOCAL_MASK_POST_CLOSE_K = 3
+LOCAL_MASK_POST_OPEN_K = 3
+
+# -----------------------------
+# contour edge refinement
+# -----------------------------
+# Turned off because it is the main source of small bumps/jagged snapping
+CONTOUR_EDGE_REFINE_ENABLE = False
+CONTOUR_REFINE_STEP_PX = 1.0
+CONTOUR_REFINE_SMOOTH_SIGMA = 2.5
+CONTOUR_REFINE_SMOOTH_PASSES = 3
+
+CONTOUR_SEARCH_IN_PX = 4
+CONTOUR_SEARCH_OUT_PX = 10
+CONTOUR_SEARCH_OUT_FIN_PX = 26
+CONTOUR_SEARCH_OUT_TAIL_PX = 34
+CONTOUR_SEARCH_SAMPLES = 25
+
+CONTOUR_EDGE_MIN_SCORE = 7.0
+CONTOUR_DIST_PENALTY = 0.16
+CONTOUR_MAX_MOVE_PX = 12.0
+CONTOUR_MASK_PULL = 0.02
+CONTOUR_FIN_BONUS = 20.0
+CONTOUR_TAIL_BONUS = 26.0
+CONTOUR_TAIL_CORNER_BONUS = 22.0
+
+EDGE_SCORE_GRAD_WEIGHT = 1.00
+EDGE_SCORE_CANNY_WEIGHT = 0.60
+EDGE_SCORE_BG_WEIGHT = 0.65
+
+DISPLAY_FIN_ROI_DILATE_PX = 22
+DISPLAY_TAIL_ROI_DILATE_PX = 22
+DISPLAY_POST_SMOOTH_SIGMA = 1.7
+DISPLAY_POST_SMOOTH_PASSES = 2
+
+# -----------------------------
+# Red mask smoothing / better fit
+# -----------------------------
+RED_MIN_COMPONENT_AREA = 25
 RED_SDF_SMOOTH_ENABLE = True
-RED_SDF_SIGMA = 2.2               # small so it hugs bleed region
+RED_SDF_SIGMA = 2.2
 RED_SDF_ITERS = 1
 RED_TIGHTEN_ENABLE = True
 RED_TIGHTEN_ERODE_PX = 1
@@ -182,7 +228,6 @@ def remove_small_components(binary_mask: np.ndarray, min_area: int) -> np.ndarra
 
 
 def fill_mask_holes(mask: np.ndarray) -> np.ndarray:
-    """Fill interior holes."""
     if mask is None or mask.size == 0:
         return mask
     h, w = mask.shape[:2]
@@ -210,7 +255,6 @@ def smooth_mask_boundary(mask: np.ndarray, k: int = 3, iters: int = 1) -> np.nda
 
 
 def sdf_smooth_mask(mask: np.ndarray, sigma: float = 6.0, iters: int = 1, level: float = 0.0) -> np.ndarray:
-    """Signed distance smoothing -> continuous rounded outline."""
     if mask is None or mask.size == 0 or cv2.countNonZero(mask) == 0:
         return mask
 
@@ -303,6 +347,29 @@ def gradient_u8(gray_or_rgb: np.ndarray) -> np.ndarray:
     return cv2.normalize(grad, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
 
+def compute_background_distance(img_rgb: np.ndarray, border_px: int = 12):
+    h, w = img_rgb.shape[:2]
+    b = int(max(2, min(border_px, h // 4, w // 4)))
+
+    lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    top = lab[:b, :, :].reshape(-1, 3)
+    bottom = lab[h - b:h, :, :].reshape(-1, 3)
+    left = lab[:, :b, :].reshape(-1, 3)
+    right = lab[:, w - b:w, :].reshape(-1, 3)
+
+    border_pixels = np.concatenate([top, bottom, left, right], axis=0)
+    bg = np.median(border_pixels, axis=0)
+
+    dist = np.sqrt(np.sum((lab - bg) ** 2, axis=2)).astype(np.float32)
+    p98 = float(np.percentile(dist, 98))
+    if p98 > 1e-6:
+        dist_norm = np.clip(dist / p98, 0.0, 1.0) * 255.0
+    else:
+        dist_norm = np.zeros_like(dist, dtype=np.float32)
+    return dist_norm.astype(np.float32)
+
+
 def compute_fish_mask_alpha(img_rgba: np.ndarray) -> np.ndarray | None:
     if img_rgba is None or img_rgba.ndim != 3 or img_rgba.shape[2] < 4:
         return None
@@ -351,8 +418,6 @@ def compute_fish_mask_edge_fallback(img_rgb: np.ndarray, alpha_mask: np.ndarray 
         area = cv2.contourArea(c)
         if area < 500:
             continue
-        if x := cv2.boundingRect(c):
-            pass
         if contour_touches_border(c, h, w, margin=BORDER_TOUCH_MARGIN):
             continue
         if area > best_area:
@@ -407,6 +472,42 @@ def tail_roi_mask(fish_mask: np.ndarray, frac: float) -> np.ndarray | None:
     return roi
 
 
+def _tail_corner_roi(fish_mask: np.ndarray) -> np.ndarray | None:
+    if fish_mask is None or cv2.countNonZero(fish_mask) == 0:
+        return None
+
+    cnt = contour_from_mask(fish_mask)
+    if cnt is None or len(cnt) < 10:
+        return None
+
+    h, w = fish_mask.shape[:2]
+    pts = cnt[:, 0, :].astype(np.float32)
+
+    M = cv2.moments(fish_mask, binaryImage=True)
+    if M["m00"] <= 0:
+        return None
+    cx = M["m10"] / M["m00"]
+    cy = M["m01"] / M["m00"]
+
+    d2 = (pts[:, 0] - cx) ** 2 + (pts[:, 1] - cy) ** 2
+    tail_pt = pts[int(np.argmax(d2))]
+
+    x_band = np.abs(pts[:, 0] - tail_pt[0]) < 34
+    y_band = np.abs(pts[:, 1] - tail_pt[1]) < 34
+    near = pts[x_band | y_band]
+    if len(near) == 0:
+        near = np.array([tail_pt], dtype=np.float32)
+
+    x1 = int(max(0, np.min(near[:, 0]) - 34))
+    x2 = int(min(w, np.max(near[:, 0]) + 34))
+    y1 = int(max(0, np.min(near[:, 1]) - 34))
+    y2 = int(min(h, np.max(near[:, 1]) + 34))
+
+    roi = np.zeros((h, w), dtype=np.uint8)
+    roi[y1:y2, x1:x2] = 255
+    return roi
+
+
 def tail_recover_fullres(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarray:
     if (not TAIL_RECOVER_ENABLE) or fish_mask is None or cv2.countNonZero(fish_mask) == 0:
         return fish_mask
@@ -441,6 +542,441 @@ def tail_recover_fullres(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarr
     out = keep_largest_connected_component(out)
     out = fill_mask_holes(out)
     return out
+
+
+def contour_from_mask(mask: np.ndarray):
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cnts:
+        return None
+    return max(cnts, key=cv2.contourArea)
+
+
+def contour_to_filled_mask(h: int, w: int, contour: np.ndarray) -> np.ndarray:
+    m = np.zeros((h, w), dtype=np.uint8)
+    if contour is not None:
+        cv2.drawContours(m, [contour], -1, 255, thickness=cv2.FILLED)
+    return m
+
+
+def _gaussian_kernel1d(sigma: float, radius: int):
+    x = np.arange(-radius, radius + 1, dtype=np.float32)
+    k = np.exp(-(x * x) / (2.0 * sigma * sigma))
+    k /= np.sum(k)
+    return k
+
+
+def _circular_convolve_1d(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    r = len(kernel) // 2
+    pad = np.concatenate([arr[-r:], arr, arr[:r]], axis=0)
+    out = np.convolve(pad, kernel, mode="valid")
+    return out
+
+
+def smooth_contour_highres(contour: np.ndarray, step_px: float, sigma: float, passes: int) -> np.ndarray:
+    if contour is None or len(contour) < 50:
+        return contour
+
+    pts = contour[:, 0, :].astype(np.float32)
+    d = np.sqrt(np.sum((np.roll(pts, -1, axis=0) - pts) ** 2, axis=1))
+    per = float(np.sum(d))
+    if per < 10:
+        return contour
+
+    step = max(0.6, float(step_px))
+    n = int(max(900, per / step))
+    cum = np.concatenate([[0.0], np.cumsum(d)])
+    s = np.linspace(0.0, per, n, endpoint=False)
+
+    idx = np.searchsorted(cum, s, side="right") - 1
+    idx = np.clip(idx, 0, len(pts) - 1)
+
+    seg_len = d[idx]
+    seg_len = np.where(seg_len < 1e-6, 1e-6, seg_len)
+    t = (s - cum[idx]) / seg_len
+
+    p0 = pts[idx]
+    p1 = pts[(idx + 1) % len(pts)]
+    res = (1.0 - t[:, None]) * p0 + t[:, None] * p1
+
+    radius = int(max(2, 3 * sigma))
+    k = _gaussian_kernel1d(float(sigma), radius)
+
+    x = res[:, 0]
+    y = res[:, 1]
+    for _ in range(int(max(1, passes))):
+        x = _circular_convolve_1d(x, k)
+        y = _circular_convolve_1d(y, k)
+
+    sm = np.stack([x, y], axis=1)
+    sm = np.round(sm).astype(np.int32)
+    return sm.reshape(-1, 1, 2)
+
+
+def _resample_closed_contour(contour: np.ndarray, step_px: float) -> np.ndarray:
+    if contour is None or len(contour) < 5:
+        return None
+
+    pts = contour[:, 0, :].astype(np.float32)
+    seg = np.roll(pts, -1, axis=0) - pts
+    d = np.sqrt(np.sum(seg * seg, axis=1))
+    per = float(np.sum(d))
+    if per < 5:
+        return None
+
+    n = int(max(320, round(per / max(0.75, float(step_px)))))
+    cum = np.concatenate([[0.0], np.cumsum(d)])
+    s = np.linspace(0.0, per, n, endpoint=False)
+
+    idx = np.searchsorted(cum, s, side="right") - 1
+    idx = np.clip(idx, 0, len(pts) - 1)
+
+    seg_len = d[idx]
+    seg_len = np.where(seg_len < 1e-6, 1e-6, seg_len)
+    t = (s - cum[idx]) / seg_len
+
+    p0 = pts[idx]
+    p1 = pts[(idx + 1) % len(pts)]
+    return (1.0 - t[:, None]) * p0 + t[:, None] * p1
+
+
+def _smooth_closed_polyline(points: np.ndarray, sigma: float, passes: int) -> np.ndarray:
+    if points is None or len(points) < 5:
+        return points
+
+    radius = int(max(2, 3 * sigma))
+    k = _gaussian_kernel1d(float(sigma), radius)
+
+    x = points[:, 0].astype(np.float32)
+    y = points[:, 1].astype(np.float32)
+    for _ in range(int(max(1, passes))):
+        x = _circular_convolve_1d(x, k)
+        y = _circular_convolve_1d(y, k)
+
+    return np.stack([x, y], axis=1)
+
+
+def _edge_score_map(img_rgb: np.ndarray) -> np.ndarray:
+    boosted = super_boost_lines_gray(img_rgb)
+    grad = gradient_u8(boosted).astype(np.float32)
+    canny = cv2.Canny(boosted, 5, 20).astype(np.float32)
+    canny = cv2.dilate(canny.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(np.float32)
+    bg = compute_background_distance(img_rgb, border_px=12).astype(np.float32)
+
+    score = (
+        float(EDGE_SCORE_GRAD_WEIGHT) * grad
+        + float(EDGE_SCORE_CANNY_WEIGHT) * canny
+        + float(EDGE_SCORE_BG_WEIGHT) * bg
+    )
+    return score.astype(np.float32)
+
+
+def _dilate_mask(mask: np.ndarray | None, px: int) -> np.ndarray | None:
+    if mask is None:
+        return None
+    p = int(max(1, px))
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * p + 1, 2 * p + 1))
+    return cv2.dilate(mask, k, iterations=1)
+
+
+def local_band_refine_mask(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarray:
+    """
+    Bigger change: refine the mask itself in a narrow band around the fish.
+    This is localized, so it should help pick up missing fins/tail without
+    creating a huge white halo.
+    """
+    if (not LOCAL_MASK_REFINE_ENABLE) or fish_mask is None or cv2.countNonZero(fish_mask) == 0:
+        return fish_mask
+
+    h, w = fish_mask.shape[:2]
+    boosted = super_boost_lines_gray(img_rgb)
+    grad = gradient_u8(boosted).astype(np.float32)
+    canny = cv2.Canny(boosted, 5, 20)
+    canny = cv2.dilate(canny, np.ones((3, 3), np.uint8), iterations=1)
+    bg_dist = compute_background_distance(img_rgb, border_px=12)
+
+    roi_fin = fin_texture_roi(img_rgb, base_mask=fish_mask)
+    roi_fin = _dilate_mask(roi_fin, DISPLAY_FIN_ROI_DILATE_PX)
+
+    roi_tail = tail_roi_mask(fish_mask, max(TAIL_ROI_FRAC, TAIL_RECOVER_FRAC))
+    roi_tail = _dilate_mask(roi_tail, DISPLAY_TAIL_ROI_DILATE_PX)
+
+    roi_tail_corner = _tail_corner_roi(fish_mask)
+    roi_tail_corner = _dilate_mask(roi_tail_corner, 18)
+
+    inner_px = int(max(1, LOCAL_MASK_INNER_ERODE_PX))
+    k_inner = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * inner_px + 1, 2 * inner_px + 1))
+    sure_fg = cv2.erode(fish_mask, k_inner, iterations=1)
+
+    outer_px = int(max(1, LOCAL_MASK_OUTER_DILATE_PX))
+    k_outer = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * outer_px + 1, 2 * outer_px + 1))
+    outer = cv2.dilate(fish_mask, k_outer, iterations=1)
+
+    if roi_fin is not None:
+        k_fin = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * int(LOCAL_MASK_OUTER_FIN_DILATE_PX) + 1, 2 * int(LOCAL_MASK_OUTER_FIN_DILATE_PX) + 1)
+        )
+        outer_fin = cv2.dilate(fish_mask, k_fin, iterations=1)
+        outer = cv2.bitwise_or(outer, cv2.bitwise_and(outer_fin, roi_fin))
+
+    if roi_tail is not None:
+        k_tail = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * int(LOCAL_MASK_OUTER_TAIL_DILATE_PX) + 1, 2 * int(LOCAL_MASK_OUTER_TAIL_DILATE_PX) + 1)
+        )
+        outer_tail = cv2.dilate(fish_mask, k_tail, iterations=1)
+        outer = cv2.bitwise_or(outer, cv2.bitwise_and(outer_tail, roi_tail))
+
+    if roi_tail_corner is not None:
+        k_tc = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (2 * int(LOCAL_MASK_OUTER_TAIL_DILATE_PX) + 1, 2 * int(LOCAL_MASK_OUTER_TAIL_DILATE_PX) + 1)
+        )
+        outer_tc = cv2.dilate(fish_mask, k_tc, iterations=1)
+        outer = cv2.bitwise_or(outer, cv2.bitwise_and(outer_tc, roi_tail_corner))
+
+    gc_mask = np.full((h, w), cv2.GC_PR_BGD, dtype=np.uint8)
+    gc_mask[outer == 0] = cv2.GC_BGD
+    gc_mask[sure_fg > 0] = cv2.GC_FGD
+    gc_mask[fish_mask > 0] = cv2.GC_PR_FGD
+
+    strong_bg = ((bg_dist < float(LOCAL_MASK_BG_THRESH)) & (grad < float(LOCAL_MASK_GRAD_THRESH)) & (canny == 0))
+    gc_mask[strong_bg & (outer == 0)] = cv2.GC_BGD
+    gc_mask[strong_bg & (outer > 0) & (sure_fg == 0)] = cv2.GC_PR_BGD
+
+    edge_fg = ((bg_dist > float(LOCAL_MASK_BG_THRESH)) | (grad > float(LOCAL_MASK_EDGE_THRESH)) | (canny > 0))
+    gc_mask[edge_fg & (outer > 0)] = np.where(
+        gc_mask[edge_fg & (outer > 0)] == cv2.GC_BGD,
+        cv2.GC_BGD,
+        cv2.GC_PR_FGD,
+    )
+
+    if roi_fin is not None:
+        fin_keep = (roi_fin > 0) & edge_fg
+        gc_mask[fin_keep] = np.where(gc_mask[fin_keep] == cv2.GC_BGD, cv2.GC_BGD, cv2.GC_PR_FGD)
+
+    if roi_tail is not None:
+        tail_keep = (roi_tail > 0) & edge_fg
+        gc_mask[tail_keep] = np.where(gc_mask[tail_keep] == cv2.GC_BGD, cv2.GC_BGD, cv2.GC_PR_FGD)
+
+    if roi_tail_corner is not None:
+        tail_corner_keep = (roi_tail_corner > 0) & edge_fg
+        gc_mask[tail_corner_keep] = np.where(gc_mask[tail_corner_keep] == cv2.GC_BGD, cv2.GC_BGD, cv2.GC_PR_FGD)
+
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+
+    try:
+        cv2.grabCut(
+            img_rgb,
+            gc_mask,
+            None,
+            bgd_model,
+            fgd_model,
+            int(max(1, LOCAL_MASK_REFINE_ITERS)),
+            mode=cv2.GC_INIT_WITH_MASK,
+        )
+    except cv2.error:
+        return fish_mask
+
+    out = np.where(
+        (gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD),
+        255,
+        0,
+    ).astype(np.uint8)
+
+    # keep anything already in the old mask to avoid regressions
+    out = cv2.bitwise_or(out, fish_mask)
+
+    kk_close = int(max(1, LOCAL_MASK_POST_CLOSE_K))
+    kk_open = int(max(1, LOCAL_MASK_POST_OPEN_K))
+    kk_close = kk_close + 1 if kk_close % 2 == 0 else kk_close
+    kk_open = kk_open + 1 if kk_open % 2 == 0 else kk_open
+
+    k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk_close, kk_close))
+    k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk_open, kk_open))
+
+    out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, k_close, iterations=1)
+    out = cv2.morphologyEx(out, cv2.MORPH_OPEN, k_open, iterations=1)
+    out = keep_largest_connected_component(out)
+    out = fill_mask_holes(out)
+    return out
+
+
+def refine_contour_to_fish_edges(
+    contour: np.ndarray,
+    img_rgb: np.ndarray,
+    fish_mask: np.ndarray,
+) -> np.ndarray:
+    if contour is None or len(contour) < 20:
+        return contour
+
+    pts = _resample_closed_contour(contour, CONTOUR_REFINE_STEP_PX)
+    if pts is None or len(pts) < 20:
+        return contour
+
+    pts = _smooth_closed_polyline(
+        pts,
+        sigma=float(CONTOUR_REFINE_SMOOTH_SIGMA),
+        passes=int(CONTOUR_REFINE_SMOOTH_PASSES),
+    )
+
+    score_map = _edge_score_map(img_rgb)
+    h, w = score_map.shape[:2]
+
+    m = (fish_mask > 0).astype(np.uint8)
+    dist_in = cv2.distanceTransform(m, cv2.DIST_L2, 3).astype(np.float32)
+    dist_out = cv2.distanceTransform(1 - m, cv2.DIST_L2, 3).astype(np.float32)
+    sdf = dist_in - dist_out
+
+    roi_tail = tail_roi_mask(fish_mask, max(TAIL_ROI_FRAC, TAIL_RECOVER_FRAC))
+    roi_tail = _dilate_mask(roi_tail, DISPLAY_TAIL_ROI_DILATE_PX)
+
+    roi_fin = fin_texture_roi(img_rgb, base_mask=fish_mask)
+    roi_fin = _dilate_mask(roi_fin, DISPLAY_FIN_ROI_DILATE_PX)
+
+    roi_tail_corner = _tail_corner_roi(fish_mask)
+    roi_tail_corner = _dilate_mask(roi_tail_corner, 18)
+
+    M = cv2.moments(fish_mask, binaryImage=True)
+    if M["m00"] > 0:
+        centroid = np.array([M["m10"] / M["m00"], M["m01"] / M["m00"]], dtype=np.float32)
+    else:
+        centroid = np.mean(pts, axis=0).astype(np.float32)
+
+    n_pts = len(pts)
+    snapped = pts.copy()
+
+    for i in range(n_pts):
+        p_prev = pts[(i - 1) % n_pts]
+        p = pts[i]
+        p_next = pts[(i + 1) % n_pts]
+
+        tangent = p_next - p_prev
+        tnorm = float(np.linalg.norm(tangent))
+        if tnorm < 1e-6:
+            continue
+        tangent /= tnorm
+
+        normal = np.array([-tangent[1], tangent[0]], dtype=np.float32)
+        if float(np.dot(normal, p - centroid)) < 0:
+            normal = -normal
+
+        px = int(round(p[0]))
+        py = int(round(p[1]))
+        if px < 0 or px >= w or py < 0 or py >= h:
+            continue
+
+        out_px = int(CONTOUR_SEARCH_OUT_PX)
+        bonus = 0.0
+
+        if roi_fin is not None and roi_fin[py, px] > 0:
+            out_px = max(out_px, int(CONTOUR_SEARCH_OUT_FIN_PX))
+            bonus += float(CONTOUR_FIN_BONUS)
+
+        if roi_tail is not None and roi_tail[py, px] > 0:
+            out_px = max(out_px, int(CONTOUR_SEARCH_OUT_TAIL_PX))
+            bonus += float(CONTOUR_TAIL_BONUS)
+
+        if roi_tail_corner is not None and roi_tail_corner[py, px] > 0:
+            out_px = max(out_px, int(CONTOUR_SEARCH_OUT_TAIL_PX))
+            bonus += float(CONTOUR_TAIL_CORNER_BONUS)
+
+        best_pt = p.copy()
+        best_score = -1e18
+
+        for t in np.linspace(-float(CONTOUR_SEARCH_IN_PX), float(out_px), int(CONTOUR_SEARCH_SAMPLES)):
+            cand = p + normal * float(t)
+            x = int(round(cand[0]))
+            y = int(round(cand[1]))
+
+            if x < 0 or x >= w or y < 0 or y >= h:
+                continue
+
+            local_score = float(score_map[y, x])
+            local_bonus = bonus
+
+            if roi_fin is not None and roi_fin[y, x] > 0:
+                local_bonus += float(CONTOUR_FIN_BONUS) * 0.6
+            if roi_tail is not None and roi_tail[y, x] > 0:
+                local_bonus += float(CONTOUR_TAIL_BONUS) * 0.6
+            if roi_tail_corner is not None and roi_tail_corner[y, x] > 0:
+                local_bonus += float(CONTOUR_TAIL_CORNER_BONUS) * 0.8
+
+            if local_score + local_bonus < float(CONTOUR_EDGE_MIN_SCORE):
+                continue
+
+            total = (
+                local_score
+                + local_bonus
+                - float(CONTOUR_DIST_PENALTY) * abs(float(t))
+                - float(CONTOUR_MASK_PULL) * abs(float(sdf[y, x]))
+            )
+
+            if total > best_score:
+                best_score = total
+                best_pt = cand
+
+        move = best_pt - p
+        move_len = float(np.linalg.norm(move))
+        if move_len > float(CONTOUR_MAX_MOVE_PX):
+            best_pt = p + move * (float(CONTOUR_MAX_MOVE_PX) / move_len)
+
+        snapped[i] = best_pt
+
+    snapped = _smooth_closed_polyline(
+        snapped,
+        sigma=float(DISPLAY_POST_SMOOTH_SIGMA),
+        passes=int(DISPLAY_POST_SMOOTH_PASSES),
+    )
+    snapped = np.round(snapped).astype(np.int32).reshape(-1, 1, 2)
+    return snapped
+
+
+def compute_final_fish_mask(img_rgb: np.ndarray, img_rgba: np.ndarray | None) -> np.ndarray:
+    h, w = img_rgb.shape[:2]
+    img_area = float(h * w)
+
+    _, base_hsv = compute_fish_mask_hsv(img_rgb)
+    base = base_hsv
+
+    alpha = compute_fish_mask_alpha(img_rgba) if img_rgba is not None else None
+    if alpha is not None:
+        a_area = float(cv2.countNonZero(alpha))
+        a_frac = a_area / img_area if img_area > 0 else 0.0
+        if MIN_FISH_AREA_FRAC <= a_frac <= MAX_FISH_AREA_FRAC:
+            base = alpha
+
+    fish_area = float(cv2.countNonZero(base))
+    frac = fish_area / img_area if img_area > 0 else 0.0
+    if frac < MIN_FISH_AREA_FRAC or frac > MAX_FISH_AREA_FRAC:
+        base = compute_fish_mask_edge_fallback(img_rgb, alpha_mask=alpha)
+
+    base = keep_largest_connected_component(base)
+    base = fill_mask_holes(base)
+
+    if ENABLE_FIN_GROW:
+        base = fin_grow_pass(img_rgb, base, FIN_BAND_FRAC_1, pass_no=1)
+        base = fin_grow_pass(img_rgb, base, FIN_BAND_FRAC_2, pass_no=2)
+
+    protect_roi = None
+    if PROTECT_ROI_ENABLE:
+        rois = []
+        if TAIL_ROI_ENABLE:
+            roi_tail = tail_roi_mask(base, TAIL_ROI_FRAC)
+            if roi_tail is not None:
+                rois.append(roi_tail)
+        roi_fin = fin_texture_roi(img_rgb, base_mask=base)
+        if roi_fin is not None:
+            rois.append(roi_fin)
+        if rois:
+            protect_roi = rois[0]
+            for r in rois[1:]:
+                protect_roi = cv2.bitwise_or(protect_roi, r)
+
+    base = peel_padding_by_gradient(img_rgb, base, protect_roi=protect_roi)
+    base = tighten_then_restore_fins(img_rgb, base, protect_roi=protect_roi)
+
+    base = keep_largest_connected_component(base)
+    base = fill_mask_holes(base)
+    return base
 
 
 def fin_grow_pass(img_rgb: np.ndarray, fish_mask: np.ndarray, band_frac: float, pass_no: int = 1) -> np.ndarray:
@@ -596,123 +1132,6 @@ def tighten_then_restore_fins(img_rgb: np.ndarray, fish_mask: np.ndarray, protec
     return out
 
 
-def contour_from_mask(mask: np.ndarray):
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not cnts:
-        return None
-    return max(cnts, key=cv2.contourArea)
-
-
-def contour_to_filled_mask(h: int, w: int, contour: np.ndarray) -> np.ndarray:
-    m = np.zeros((h, w), dtype=np.uint8)
-    if contour is not None:
-        cv2.drawContours(m, [contour], -1, 255, thickness=cv2.FILLED)
-    return m
-
-
-def _gaussian_kernel1d(sigma: float, radius: int):
-    x = np.arange(-radius, radius + 1, dtype=np.float32)
-    k = np.exp(-(x * x) / (2.0 * sigma * sigma))
-    k /= np.sum(k)
-    return k
-
-
-def _circular_convolve_1d(arr: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    r = len(kernel) // 2
-    pad = np.concatenate([arr[-r:], arr, arr[:r]], axis=0)
-    out = np.convolve(pad, kernel, mode="valid")
-    return out
-
-
-def smooth_contour_highres(contour: np.ndarray, step_px: float, sigma: float, passes: int) -> np.ndarray:
-    if contour is None or len(contour) < 50:
-        return contour
-
-    pts = contour[:, 0, :].astype(np.float32)
-    d = np.sqrt(np.sum((np.roll(pts, -1, axis=0) - pts) ** 2, axis=1))
-    per = float(np.sum(d))
-    if per < 10:
-        return contour
-
-    step = max(0.6, float(step_px))
-    n = int(max(900, per / step))
-    cum = np.concatenate([[0.0], np.cumsum(d)])
-    s = np.linspace(0.0, per, n, endpoint=False)
-
-    idx = np.searchsorted(cum, s, side="right") - 1
-    idx = np.clip(idx, 0, len(pts) - 1)
-
-    seg_len = d[idx]
-    seg_len = np.where(seg_len < 1e-6, 1e-6, seg_len)
-    t = (s - cum[idx]) / seg_len
-
-    p0 = pts[idx]
-    p1 = pts[(idx + 1) % len(pts)]
-    res = (1.0 - t[:, None]) * p0 + t[:, None] * p1
-
-    radius = int(max(2, 3 * sigma))
-    k = _gaussian_kernel1d(float(sigma), radius)
-
-    x = res[:, 0]
-    y = res[:, 1]
-    for _ in range(int(max(1, passes))):
-        x = _circular_convolve_1d(x, k)
-        y = _circular_convolve_1d(y, k)
-
-    sm = np.stack([x, y], axis=1)
-    sm = np.round(sm).astype(np.int32)
-    return sm.reshape(-1, 1, 2)
-
-
-def compute_final_fish_mask(img_rgb: np.ndarray, img_rgba: np.ndarray | None) -> np.ndarray:
-    h, w = img_rgb.shape[:2]
-    img_area = float(h * w)
-
-    _, base_hsv = compute_fish_mask_hsv(img_rgb)
-    base = base_hsv
-
-    alpha = compute_fish_mask_alpha(img_rgba) if img_rgba is not None else None
-    if alpha is not None:
-        a_area = float(cv2.countNonZero(alpha))
-        a_frac = a_area / img_area if img_area > 0 else 0.0
-        if MIN_FISH_AREA_FRAC <= a_frac <= MAX_FISH_AREA_FRAC:
-            base = alpha
-
-    fish_area = float(cv2.countNonZero(base))
-    frac = fish_area / img_area if img_area > 0 else 0.0
-    if frac < MIN_FISH_AREA_FRAC or frac > MAX_FISH_AREA_FRAC:
-        base = compute_fish_mask_edge_fallback(img_rgb, alpha_mask=alpha)
-
-    base = keep_largest_connected_component(base)
-    base = fill_mask_holes(base)
-
-    if ENABLE_FIN_GROW:
-        base = fin_grow_pass(img_rgb, base, FIN_BAND_FRAC_1, pass_no=1)
-        base = fin_grow_pass(img_rgb, base, FIN_BAND_FRAC_2, pass_no=2)
-
-    protect_roi = None
-    if PROTECT_ROI_ENABLE:
-        rois = []
-        if TAIL_ROI_ENABLE:
-            roi_tail = tail_roi_mask(base, TAIL_ROI_FRAC)
-            if roi_tail is not None:
-                rois.append(roi_tail)
-        roi_fin = fin_texture_roi(img_rgb, base_mask=base)
-        if roi_fin is not None:
-            rois.append(roi_fin)
-        if rois:
-            protect_roi = rois[0]
-            for r in rois[1:]:
-                protect_roi = cv2.bitwise_or(protect_roi, r)
-
-    base = peel_padding_by_gradient(img_rgb, base, protect_roi=protect_roi)
-    base = tighten_then_restore_fins(img_rgb, base, protect_roi=protect_roi)
-
-    base = keep_largest_connected_component(base)
-    base = fill_mask_holes(base)
-    return base
-
-
 def compute_bleeding_metrics(img_rgb: np.ndarray, fish_mask: np.ndarray, hsv: np.ndarray):
     total_fish_pixel_area = int(cv2.countNonZero(fish_mask))
 
@@ -748,28 +1167,13 @@ def compute_bleeding_metrics(img_rgb: np.ndarray, fish_mask: np.ndarray, hsv: np
     }
 
 
-# --- ONLY SHOWING THE MODIFIED FUNCTION ---
-# Replace your existing smooth_red_mask function with THIS one
-
 def smooth_red_mask(red_mask_in_fish: np.ndarray, img_rgb: np.ndarray | None = None) -> np.ndarray:
-    """
-    Stronger red mask fitting:
-    - Remove specks
-    - Re-project to strong HSV red only
-    - Edge-aware tightening
-    - Signed distance smoothing (keeps smooth curve)
-    - Final clamp to real red pixels
-    """
-
     if red_mask_in_fish is None or red_mask_in_fish.size == 0 or cv2.countNonZero(red_mask_in_fish) == 0:
         return red_mask_in_fish
 
     mask = (red_mask_in_fish > 0).astype(np.uint8) * 255
-
-    # Remove tiny specks
     mask = remove_small_components(mask, min_area=40)
 
-    # ---- STRICT RED RE-PROJECTION (important fix) ----
     if img_rgb is not None:
         hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
 
@@ -784,26 +1188,18 @@ def smooth_red_mask(red_mask_in_fish: np.ndarray, img_rgb: np.ndarray | None = N
 
         mask = cv2.bitwise_and(mask, strong_red)
 
-    # Fill holes before smoothing
     mask = fill_mask_holes(mask)
 
-    # ---- EDGE-AWARE TIGHTENING ----
     if img_rgb is not None:
         gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
         grad = gradient_u8(gray)
-
-        # Only keep red where gradient is reasonably strong
         edge_keep = (grad > 25).astype(np.uint8) * 255
         mask = cv2.bitwise_and(mask, cv2.bitwise_or(mask, edge_keep))
 
-    # Slight erosion to tighten boundary
     ke = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.erode(mask, ke, iterations=1)
-
-    # ---- SDF SMOOTH (keeps curve continuous) ----
     mask = sdf_smooth_mask(mask, sigma=2.0, iters=1, level=0.05)
 
-    # Final clamp to real red again (prevents orange bleed)
     if img_rgb is not None:
         hsv = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2HSV)
         lower1 = np.array([0, 100, 50], dtype=np.uint8)
@@ -819,7 +1215,6 @@ def smooth_red_mask(red_mask_in_fish: np.ndarray, img_rgb: np.ndarray | None = N
 
     mask = fill_mask_holes(mask)
     mask = keep_largest_connected_component(mask)
-
     return mask
 
 
@@ -858,7 +1253,6 @@ def index():
         except Exception:
             return "Invalid image file", 400
 
-        # process at working size
         img_rgb_proc, scale = resize_for_processing(img_rgb_full, WORK_MAX_DIM)
         if scale != 1.0:
             new_w = img_rgb_proc.shape[1]
@@ -869,7 +1263,6 @@ def index():
 
         fish_mask_proc = compute_final_fish_mask(img_rgb_proc, img_rgba_proc)
 
-        # scale mask back to full-res
         if scale != 1.0:
             fish_mask_full = cv2.resize(
                 fish_mask_proc,
@@ -882,23 +1275,21 @@ def index():
         fish_mask_full = keep_largest_connected_component(fish_mask_full)
         fish_mask_full = fill_mask_holes(fish_mask_full)
 
-        # Recover missing tail tip first
         fish_mask_full = tail_recover_fullres(img_rgb_full, fish_mask_full)
 
-        # gentle boundary cleanup
+        if LOCAL_MASK_REFINE_ENABLE:
+            fish_mask_full = local_band_refine_mask(img_rgb_full, fish_mask_full)
+
         if BOUNDARY_SMOOTH_ENABLE:
             fish_mask_full = smooth_mask_boundary(
                 fish_mask_full, k=BOUNDARY_SMOOTH_K, iters=BOUNDARY_SMOOTH_ITERS
             )
 
-        # Stage A: SDF smooth (keeps curve), mild expansion (less loose than before)
         if SDF_SMOOTH_ENABLE:
             fish_mask_full = sdf_smooth_mask(
                 fish_mask_full, sigma=SDF_SIGMA, iters=SDF_ITERS, level=SDF_LEVEL_STAGE_A
             )
 
-            # Tighten fit WITHOUT losing smoothness:
-            # erode a touch, then run SDF again (this keeps the same smooth curve quality)
             if FISH_TIGHTEN_ENABLE and int(FISH_TIGHTEN_ERODE_PX) > 0:
                 e = int(FISH_TIGHTEN_ERODE_PX)
                 ke = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * e + 1, 2 * e + 1))
@@ -907,9 +1298,13 @@ def index():
                     fish_mask_full, sigma=SDF_SIGMA, iters=1, level=SDF_LEVEL_STAGE_B
                 )
 
-        # Contour from smoothed/tightened mask
+        fish_mask_full = keep_largest_connected_component(fish_mask_full)
+        fish_mask_full = fill_mask_holes(fish_mask_full)
+
         best_contour = contour_from_mask(fish_mask_full)
 
+        # Smooth the final contour unconditionally so the displayed outline
+        # is continuous and less bumpy.
         if best_contour is not None and OUTLINE_SMOOTH_ENABLE:
             best_contour = smooth_contour_highres(
                 best_contour,
@@ -917,9 +1312,7 @@ def index():
                 sigma=SMOOTH_SIGMA,
                 passes=SMOOTH_PASSES
             )
-            # keep snap OFF by default
 
-        # Display mask from contour so outline matches mask
         if best_contour is not None:
             fish_mask_display = contour_to_filled_mask(
                 img_rgb_full.shape[0], img_rgb_full.shape[1], best_contour
@@ -939,12 +1332,18 @@ def index():
                 lineType=cv2.LINE_AA
             )
         else:
-            fish_edges = make_edge_outline_mask(fish_mask_display, thickness=max(2, FISH_OUTLINE_THICKNESS // 3))
+            fish_edges = make_edge_outline_mask(
+                fish_mask_display,
+                thickness=max(2, FISH_OUTLINE_THICKNESS // 3)
+            )
             traced[fish_edges > 0] = (0, 0, 0)
 
-        metrics_full = compute_bleeding_metrics(img_rgb=img_rgb_full, fish_mask=fish_mask_display, hsv=hsv_full)
+        metrics_full = compute_bleeding_metrics(
+            img_rgb=img_rgb_full,
+            fish_mask=fish_mask_display,
+            hsv=hsv_full
+        )
 
-        # NEW: smoother red mask that hugs the bleed region better
         red_clean = smooth_red_mask(metrics_full["red_mask_in_fish"], img_rgb_full)
 
         bleed_edge = make_edge_outline_mask(red_clean, thickness=BLEED_EDGE_THICKNESS)
