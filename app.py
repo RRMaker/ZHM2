@@ -126,6 +126,27 @@ TAIL_RECOVER_V_MIN = 20
 TAIL_RECOVER_EDGE_DILATE = 3
 
 # -----------------------------
+# Tail-corner recovery
+# -----------------------------
+TAIL_CORNER_RECOVER_ENABLE = True
+TAIL_CORNER_RECOVER_ROI_DILATE_PX = 36
+TAIL_CORNER_RECOVER_NEAR_PX = 32
+TAIL_CORNER_RECOVER_MAX_ADD_FRAC = 0.03
+TAIL_CORNER_RECOVER_BG_MIN = 4.0
+TAIL_CORNER_RECOVER_GRAD_MIN = 4.0
+TAIL_CORNER_RECOVER_MIN_DROP_PX = 4
+TAIL_CORNER_RECOVER_ANCHOR_SPAN_PX = 34
+TAIL_CORNER_RECOVER_ANCHOR_GAP_PX = 10
+TAIL_CORNER_RECOVER_ANCHOR_BAND_PX = 80
+TAIL_CORNER_RECOVER_LOCAL_HALF_W_PX = 46
+TAIL_CORNER_RECOVER_LOCAL_UP_PX = 40
+TAIL_CORNER_RECOVER_LOCAL_DOWN_PX = 8
+TAIL_CORNER_RECOVER_TOUCH_DILATE_PX = 4
+TAIL_CORNER_RECOVER_LOCAL_MIN_AREA = 3
+TAIL_CORNER_RECOVER_NEAR_COMBINED_PX = 3
+TAIL_CORNER_RECOVER_LOCAL_Y_PAD_PX = 1
+
+# -----------------------------
 # Small boundary smoothing on mask
 # -----------------------------
 BOUNDARY_SMOOTH_ENABLE = True
@@ -178,6 +199,24 @@ DISPLAY_FIN_ROI_DILATE_PX = 22
 DISPLAY_TAIL_ROI_DILATE_PX = 22
 DISPLAY_POST_SMOOTH_SIGMA = 1.7
 DISPLAY_POST_SMOOTH_PASSES = 2
+
+# -----------------------------
+# Tail-preserving display fix
+# -----------------------------
+TAIL_PRESERVE_ENABLE = True
+TAIL_PRESERVE_ROI_FRAC = 0.34
+TAIL_PRESERVE_DILATE_PX = 10
+TAIL_PRESERVE_CLOSE_K = 5
+TAIL_PRESERVE_FINAL_SMOOTH_SIGMA = 1.8
+TAIL_PRESERVE_FINAL_SMOOTH_PASSES = 2
+
+# Tail-corner fill after smoothing/preservation
+TAIL_CORNER_FILL_ENABLE = True
+TAIL_CORNER_FILL_HALF_W_PX = 56
+TAIL_CORNER_FILL_UP_PX = 56
+TAIL_CORNER_FILL_BOTTOM_BAND_PX = 16
+TAIL_CORNER_FILL_ROI_DILATE_PX = 12
+TAIL_CORNER_FILL_MAX_ADD_PX = 160
 
 # -----------------------------
 # Red mask smoothing / better fit
@@ -678,6 +717,178 @@ def _dilate_mask(mask: np.ndarray | None, px: int) -> np.ndarray | None:
     return cv2.dilate(mask, k, iterations=1)
 
 
+def recover_tail_corner_hull(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarray:
+    """
+    Recover a faint tail-tip corner by finding the deepest supported point
+    below the current tail edge, then bridging to it with a narrow wedge.
+    """
+    if (not TAIL_CORNER_RECOVER_ENABLE) or fish_mask is None or cv2.countNonZero(fish_mask) == 0:
+        return fish_mask
+
+    roi = _tail_corner_roi(fish_mask)
+    if roi is None:
+        return fish_mask
+
+    roi = _dilate_mask(roi, TAIL_CORNER_RECOVER_ROI_DILATE_PX)
+    if roi is None or cv2.countNonZero(roi) == 0:
+        return fish_mask
+
+    near_tail = _dilate_mask(fish_mask, TAIL_CORNER_RECOVER_NEAR_PX)
+    if near_tail is None or cv2.countNonZero(near_tail) == 0:
+        return fish_mask
+
+    boosted = super_boost_lines_gray(img_rgb)
+    grad = gradient_u8(boosted).astype(np.float32)
+    bg_dist = compute_background_distance(img_rgb, border_px=12).astype(np.float32)
+
+    supported = np.zeros_like(fish_mask, dtype=np.uint8)
+    supported[
+        (roi > 0)
+        & (near_tail > 0)
+        & (fish_mask == 0)
+        & (
+            (bg_dist >= float(TAIL_CORNER_RECOVER_BG_MIN))
+            | (grad >= float(TAIL_CORNER_RECOVER_GRAD_MIN))
+        )
+    ] = 255
+
+    ys_mask, xs_mask = np.where((fish_mask > 0) & (roi > 0))
+    if len(xs_mask) == 0:
+        return fish_mask
+
+    bottom_by_x: dict[int, int] = {}
+    for x, y in zip(xs_mask, ys_mask):
+        x = int(x)
+        y = int(y)
+        prev = bottom_by_x.get(x)
+        if prev is None or y > prev:
+            bottom_by_x[x] = y
+
+    below_edge = np.zeros_like(fish_mask, dtype=np.uint8)
+    min_drop = int(max(1, TAIL_CORNER_RECOVER_MIN_DROP_PX))
+    for x, y0 in bottom_by_x.items():
+        ys = np.where(supported[:, x] > 0)[0]
+        if len(ys) == 0:
+            continue
+        ys = ys[ys >= (int(y0) + min_drop)]
+        below_edge[ys, x] = 255
+
+    below_edge = remove_small_components(below_edge, min_area=6)
+    if cv2.countNonZero(below_edge) == 0:
+        return fish_mask
+
+    cand_pts = np.column_stack(np.where(below_edge > 0))
+    anchor_y, anchor_x = cand_pts[int(np.argmax(cand_pts[:, 0]))]
+    anchor = np.array([int(anchor_x), int(anchor_y)], dtype=np.int32)
+
+    contour = contour_from_mask(fish_mask)
+    if contour is None or len(contour) < 20:
+        return fish_mask
+    contour_pts = contour[:, 0, :].astype(np.int32)
+    band = contour_pts[contour_pts[:, 1] >= (anchor[1] - int(TAIL_CORNER_RECOVER_ANCHOR_BAND_PX))]
+    if len(band) < 2:
+        return fish_mask
+
+    span = int(max(8, TAIL_CORNER_RECOVER_ANCHOR_SPAN_PX))
+    gap = int(max(0, TAIL_CORNER_RECOVER_ANCHOR_GAP_PX))
+
+    left_pts = band[band[:, 0] <= (anchor[0] - gap)]
+    right_pts = band[band[:, 0] >= (anchor[0] + gap)]
+    if len(left_pts) == 0 or len(right_pts) == 0:
+        return fish_mask
+
+    left_target = anchor[0] - span
+    right_target = anchor[0] + span
+
+    left_score = left_pts[:, 1].astype(np.float32) - 0.8 * np.abs(left_pts[:, 0] - left_target)
+    right_score = right_pts[:, 1].astype(np.float32) - 0.8 * np.abs(right_pts[:, 0] - right_target)
+
+    left_anchor = left_pts[int(np.argmax(left_score))]
+    right_anchor = right_pts[int(np.argmax(right_score))]
+
+    if left_anchor[0] >= right_anchor[0]:
+        return fish_mask
+
+    poly = np.array([left_anchor, anchor, right_anchor], dtype=np.int32).reshape(-1, 1, 2)
+    addition = np.zeros_like(fish_mask, dtype=np.uint8)
+    cv2.fillPoly(addition, [poly], 255)
+    addition = cv2.bitwise_and(addition, addition, mask=roi)
+    addition = cv2.bitwise_and(addition, near_tail)
+    addition = cv2.bitwise_and(addition, cv2.bitwise_not(fish_mask))
+
+    if cv2.countNonZero(addition) == 0:
+        return fish_mask
+
+    fish_area = int(cv2.countNonZero(fish_mask))
+    max_add = max(180, int(round(fish_area * float(TAIL_CORNER_RECOVER_MAX_ADD_FRAC))))
+    if cv2.countNonZero(addition) > max_add:
+        return fish_mask
+
+    combined = cv2.bitwise_or(fish_mask, addition)
+
+    # Use only nearby, touching support around the recovered tip so we pick up
+    # a missing tail corner without stretching the whole tip farther down.
+    local_roi = np.zeros_like(fish_mask, dtype=np.uint8)
+    half_w = int(max(12, TAIL_CORNER_RECOVER_LOCAL_HALF_W_PX))
+    up_px = int(max(12, TAIL_CORNER_RECOVER_LOCAL_UP_PX))
+    down_px = int(max(2, TAIL_CORNER_RECOVER_LOCAL_DOWN_PX))
+    cv2.rectangle(
+        local_roi,
+        (max(0, int(anchor[0]) - half_w), max(0, int(anchor[1]) - up_px)),
+        (min(fish_mask.shape[1] - 1, int(anchor[0]) + half_w), min(fish_mask.shape[0] - 1, int(anchor[1]) + down_px)),
+        255,
+        thickness=cv2.FILLED,
+    )
+
+    touch_px = int(max(1, TAIL_CORNER_RECOVER_TOUCH_DILATE_PX))
+    k_touch = np.ones((2 * touch_px + 1, 2 * touch_px + 1), np.uint8)
+    touch_seed = cv2.dilate(combined, k_touch, iterations=1)
+    touch_seed = cv2.bitwise_and(touch_seed, local_roi)
+
+    corner_support = cv2.bitwise_and(supported, touch_seed)
+    corner_support = remove_small_components(corner_support, min_area=int(max(1, TAIL_CORNER_RECOVER_LOCAL_MIN_AREA)))
+
+    if cv2.countNonZero(corner_support) > 0:
+        local_mask = cv2.bitwise_and(combined, local_roi)
+        hull_pts = []
+        for src in (local_mask, corner_support):
+            cnts, _ = cv2.findContours(src, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+            for c in cnts:
+                if len(c) > 0:
+                    hull_pts.append(c)
+
+        if hull_pts:
+            local_hull = cv2.convexHull(np.concatenate(hull_pts, axis=0))
+            local_hull_mask = contour_to_filled_mask(fish_mask.shape[0], fish_mask.shape[1], local_hull)
+            local_hull_mask = cv2.bitwise_and(local_hull_mask, local_hull_mask, mask=local_roi)
+            local_hull_mask = cv2.bitwise_and(local_hull_mask, near_tail)
+            near_combined_px = int(max(1, TAIL_CORNER_RECOVER_NEAR_COMBINED_PX))
+            k_near = np.ones((2 * near_combined_px + 1, 2 * near_combined_px + 1), np.uint8)
+            near_combined = cv2.dilate(combined, k_near, iterations=1)
+            local_hull_mask = cv2.bitwise_and(local_hull_mask, near_combined)
+
+            current_contour = contour_from_mask(combined)
+            if current_contour is not None and len(current_contour) > 0:
+                current_tip_y = int(np.max(current_contour[:, 0, 1]))
+                clip = np.zeros_like(local_hull_mask, dtype=np.uint8)
+                cv2.rectangle(
+                    clip,
+                    (0, 0),
+                    (fish_mask.shape[1] - 1, min(fish_mask.shape[0] - 1, current_tip_y + int(max(0, TAIL_CORNER_RECOVER_LOCAL_Y_PAD_PX)))),
+                    255,
+                    thickness=cv2.FILLED,
+                )
+                local_hull_mask = cv2.bitwise_and(local_hull_mask, clip)
+
+            addition = cv2.bitwise_or(addition, cv2.bitwise_and(local_hull_mask, cv2.bitwise_not(fish_mask)))
+            combined = cv2.bitwise_or(fish_mask, addition)
+
+    out = combined
+    out = keep_largest_connected_component(out)
+    out = fill_mask_holes(out)
+    return out
+
+
 def local_band_refine_mask(img_rgb: np.ndarray, fish_mask: np.ndarray) -> np.ndarray:
     """
     Bigger change: refine the mask itself in a narrow band around the fish.
@@ -929,6 +1140,589 @@ def refine_contour_to_fish_edges(
     snapped = np.round(snapped).astype(np.int32).reshape(-1, 1, 2)
     return snapped
 
+
+def preserve_tail_from_mask(
+    display_mask: np.ndarray,
+    source_mask: np.ndarray,
+    img_rgb: np.ndarray | None = None,
+) -> np.ndarray:
+    """
+    Prevent the final smoothed display contour from shaving off the tail tip/corner.
+    We keep the smoothed outline globally, but locally union back reliable pixels
+    from the original mask inside an expanded tail ROI, then rebuild the contour.
+    """
+    if (not TAIL_PRESERVE_ENABLE) or display_mask is None or source_mask is None:
+        return display_mask
+    if cv2.countNonZero(display_mask) == 0 or cv2.countNonZero(source_mask) == 0:
+        return display_mask
+
+    roi = tail_roi_mask(source_mask, TAIL_PRESERVE_ROI_FRAC)
+    if roi is None:
+        return display_mask
+
+    corner_roi = _tail_corner_roi(source_mask)
+    if corner_roi is not None:
+        roi = cv2.bitwise_or(roi, corner_roi)
+
+    roi = _dilate_mask(roi, TAIL_PRESERVE_DILATE_PX)
+
+    src_tail = cv2.bitwise_and(source_mask, source_mask, mask=roi)
+    disp_tail = cv2.bitwise_and(display_mask, display_mask, mask=roi)
+
+    missing_tail = cv2.bitwise_and(src_tail, cv2.bitwise_not(disp_tail))
+    if cv2.countNonZero(missing_tail) == 0:
+        return display_mask
+
+    if img_rgb is not None:
+        boosted = super_boost_lines_gray(img_rgb)
+        grad = gradient_u8(boosted)
+        edge = cv2.Canny(boosted, 4, 18)
+        edge = cv2.dilate(edge, np.ones((3, 3), np.uint8), iterations=1)
+
+        guided = np.zeros_like(missing_tail)
+        guided[(missing_tail > 0) & ((grad > 6) | (edge > 0))] = 255
+
+        # Fall back to the original missing pixels if the edge cue is too weak.
+        if cv2.countNonZero(guided) > 0:
+            missing_tail = cv2.bitwise_or(missing_tail, guided)
+
+    merged = cv2.bitwise_or(display_mask, missing_tail)
+
+    kk = int(TAIL_PRESERVE_CLOSE_K)
+    kk = kk + 1 if kk % 2 == 0 else kk
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kk, kk))
+    merged_roi = cv2.bitwise_and(merged, merged, mask=roi)
+    merged_roi = cv2.morphologyEx(merged_roi, cv2.MORPH_CLOSE, k, iterations=1)
+    merged[roi > 0] = merged_roi[roi > 0]
+
+    merged = keep_largest_connected_component(merged)
+    merged = fill_mask_holes(merged)
+    return merged
+
+
+def _open_profile_1d(values: np.ndarray, kernel: int = 5) -> np.ndarray:
+    """
+    Remove short positive spikes from a 1D boundary profile.
+    """
+    if values is None or values.size == 0:
+        return values
+
+    kk = int(max(3, kernel))
+    kk = kk + 1 if kk % 2 == 0 else kk
+    half = kk // 2
+
+    eroded = np.empty_like(values)
+    for i in range(len(values)):
+        lo = max(0, i - half)
+        hi = min(len(values), i + half + 1)
+        eroded[i] = int(np.min(values[lo:hi]))
+
+    opened = np.empty_like(values)
+    for i in range(len(values)):
+        lo = max(0, i - half)
+        hi = min(len(values), i + half + 1)
+        opened[i] = int(np.max(eroded[lo:hi]))
+
+    return opened
+
+
+def _cap_profile_local_peaks(
+    values: np.ndarray,
+    shoulder_slack: int = 1,
+    peak_tol: int = 1,
+    passes: int = 2,
+) -> np.ndarray:
+    """
+    Clip narrow one- and two-row outward spikes from a 1D right-edge profile.
+    """
+    if values is None or values.size < 3:
+        return values
+
+    capped = values.copy()
+    for _ in range(int(max(1, passes))):
+        prev = capped.copy()
+
+        for i in range(1, len(capped) - 1):
+            shoulder = int(max(capped[i - 1], capped[i + 1]))
+            if capped[i] > shoulder + int(peak_tol):
+                capped[i] = min(capped[i], shoulder + int(shoulder_slack))
+
+        for i in range(1, len(capped) - 2):
+            shoulder = int(max(capped[i - 1], capped[i + 2]))
+            plateau = int(max(capped[i], capped[i + 1]))
+            if plateau > shoulder + int(peak_tol):
+                cap = shoulder + int(shoulder_slack)
+                capped[i] = min(capped[i], cap)
+                capped[i + 1] = min(capped[i + 1], cap)
+
+        if np.array_equal(capped, prev):
+            break
+
+    return capped
+
+
+def _cap_upper_connector_spur(
+    values: np.ndarray,
+    trim_rows: int = 30,
+    lookahead_offset: int = 4,
+    lookahead_span: int = 8,
+    ref_percentile: float = 35.0,
+    spur_tol: int = 3,
+    slack: int = 1,
+    passes: int = 2,
+) -> np.ndarray:
+    """
+    Clip the upper recovered connector rows if they stick farther right than
+    the extension profile immediately below them.
+    """
+    if values is None or values.size < (lookahead_offset + 2):
+        return values
+
+    capped = values.copy()
+    last_i = min(int(trim_rows), len(capped) - (int(lookahead_offset) + 1))
+    if last_i <= 0:
+        return capped
+
+    for _ in range(int(max(1, passes))):
+        prev = capped.copy()
+        for i in range(last_i):
+            j0 = i + int(lookahead_offset)
+            j1 = min(len(capped), j0 + int(lookahead_span))
+            future = capped[j0:j1]
+            if future.size == 0:
+                continue
+
+            ref = int(np.percentile(future, float(ref_percentile)))
+            if capped[i] > ref + int(spur_tol):
+                capped[i] = ref + int(slack)
+
+        if np.array_equal(capped, prev):
+            break
+
+    return capped
+
+
+def trim_tail_corner_right_bumps(
+    base_mask: np.ndarray,
+    recovered_mask: np.ndarray,
+    tip_x: int,
+    tip_y: int,
+) -> np.ndarray:
+    """
+    Shave short outward bumps from the recovered lower-right tail corner
+    without undoing the recovered corner itself.
+    """
+    if (
+        base_mask is None
+        or recovered_mask is None
+        or cv2.countNonZero(base_mask) == 0
+        or cv2.countNonZero(recovered_mask) == 0
+    ):
+        return recovered_mask
+
+    added = cv2.bitwise_and(recovered_mask, cv2.bitwise_not(base_mask))
+    if cv2.countNonZero(added) == 0:
+        return recovered_mask
+
+    band_px = 74
+    head_rows = 8
+    foot_rows = 6
+    right_roi_left_pad = 8
+    slack_px = 1
+
+    y0 = max(0, int(tip_y) - band_px)
+    ys: list[int] = []
+    base_profile: list[int] = []
+    right_profile: list[int] = []
+
+    for y in range(y0, int(tip_y) + 1):
+        rec_row = np.where(recovered_mask[y] > 0)[0]
+        if len(rec_row) == 0:
+            continue
+
+        base_row = np.where(base_mask[y] > 0)[0]
+        rec_right = int(rec_row.max())
+        base_right = int(base_row.max()) if len(base_row) > 0 else -1
+
+        if rec_right <= base_right:
+            continue
+
+        ys.append(y)
+        base_profile.append(base_right)
+        right_profile.append(rec_right)
+
+    if len(right_profile) < 6:
+        return recovered_mask
+
+    base_arr = np.array(base_profile, dtype=np.int32)
+    profile = np.array(right_profile, dtype=np.int32)
+    ext_profile = np.maximum(0, profile - base_arr)
+
+    ext_opened = _open_profile_1d(ext_profile, kernel=9)
+    allowed_ext = np.minimum(ext_profile, ext_opened + 1)
+    allowed_ext = np.minimum(
+        allowed_ext,
+        _cap_upper_connector_spur(
+            allowed_ext,
+            trim_rows=30,
+            lookahead_offset=4,
+            lookahead_span=8,
+            ref_percentile=35.0,
+            spur_tol=3,
+            slack=1,
+            passes=2,
+        ),
+    )
+
+    lower_rows = min(28, len(profile))
+    lower_start = len(profile) - lower_rows
+    lower_profile = profile[lower_start:]
+    opened = _open_profile_1d(lower_profile, kernel=5)
+
+    head_n = min(head_rows, len(opened))
+    foot_n = min(foot_rows, len(opened))
+    head_x = int(np.percentile(opened[:head_n], 25))
+    foot_x = int(np.percentile(opened[-foot_n:], 50))
+    linear_cap = np.rint(np.linspace(head_x, foot_x, len(lower_profile))).astype(np.int32)
+
+    lower_allowed = np.minimum(lower_profile, np.minimum(opened + slack_px, linear_cap + slack_px))
+    lower_allowed = np.minimum(
+        lower_allowed,
+        _cap_profile_local_peaks(
+            lower_allowed,
+            shoulder_slack=1,
+            peak_tol=1,
+            passes=2,
+        ),
+    )
+    allowed_ext[lower_start:] = np.minimum(
+        allowed_ext[lower_start:],
+        np.maximum(0, lower_allowed - base_arr[lower_start:]),
+    )
+
+    trimmed_added = added.copy()
+    cut_left = max(0, int(tip_x) - right_roi_left_pad)
+    for idx, y in enumerate(ys):
+        allowed_right = int(base_arr[idx] + allowed_ext[idx])
+        cut_x = max(cut_left, allowed_right + 1)
+        trimmed_added[y, cut_x:] = 0
+
+    if cv2.countNonZero(trimmed_added) == cv2.countNonZero(added):
+        return recovered_mask
+
+    trimmed_added = remove_small_components(trimmed_added, min_area=3)
+    trimmed = cv2.bitwise_or(base_mask, trimmed_added)
+    trimmed = keep_largest_connected_component(trimmed)
+    trimmed = fill_mask_holes(trimmed)
+    return trimmed
+
+
+def recover_tail_corner_right_flank_from_image(
+    img_rgb: np.ndarray,
+    mask: np.ndarray,
+) -> np.ndarray:
+    """
+    Recover the clipped upper-right tail flank by fitting the visible right
+    flank near the tail tip, then extending the current edge toward the
+    strongest nearby image support on that fitted side only.
+    """
+    if img_rgb is None or mask is None or cv2.countNonZero(mask) == 0:
+        return mask
+
+    contour = contour_from_mask(mask)
+    if contour is None or len(contour) < 40:
+        return mask
+
+    pts = contour[:, 0, :].astype(np.int32)
+    tip_idx = int(np.argmax(pts[:, 1]))
+    tip = pts[tip_idx]
+    tip_y = int(tip[1])
+
+    def extract_arc(step: int, max_points: int = 100, max_y_drop: int = 64) -> np.ndarray:
+        n = len(pts)
+        arc = []
+        i = tip_idx
+        for _ in range(max_points):
+            p = pts[i % n]
+            arc.append(p)
+            if tip_y - int(p[1]) >= max_y_drop:
+                break
+            i += step
+        return np.array(arc, dtype=np.int32)
+
+    forward_arc = extract_arc(+1)
+    backward_arc = extract_arc(-1)
+    right_arc = forward_arc if float(np.mean(forward_arc[:, 0])) > float(np.mean(backward_arc[:, 0])) else backward_arc
+    fit_pts = right_arc[8:min(len(right_arc), 52)].astype(np.float32)
+    if len(fit_pts) < 8:
+        return mask
+
+    vx, vy, x0, y0 = [float(v) for v in cv2.fitLine(
+        fit_pts.reshape(-1, 1, 2),
+        cv2.DIST_L2,
+        0,
+        0.01,
+        0.01
+    ).reshape(-1)]
+    if abs(vy) < 1e-4:
+        return mask
+
+    boost = super_boost_lines_gray(img_rgb)
+    grad = gradient_u8(boost).astype(np.float32)
+    bg = compute_background_distance(img_rgb, border_px=12).astype(np.float32)
+    edge = cv2.Canny(boost, 4, 18).astype(np.float32)
+    score = grad + 0.8 * bg + 0.5 * edge
+
+    add = np.zeros_like(mask, dtype=np.uint8)
+    outer_pts: list[tuple[int, int]] = []
+    y_top = max(0, tip_y - 60)
+    for y in range(y_top, tip_y + 1):
+        row = np.where(mask[y] > 0)[0]
+        if len(row) == 0:
+            continue
+
+        edge_x = int(row.max())
+        pred_x = int(round(x0 + (y - y0) * (vx / vy)))
+        x_from = max(edge_x + 1, pred_x - 22)
+        x_to = min(mask.shape[1] - 1, pred_x + 22)
+        if x_to <= edge_x:
+            continue
+
+        row_score = score[y, x_from:x_to + 1]
+        if row_score.size == 0:
+            continue
+
+        best_rel = int(np.argmax(row_score))
+        if float(row_score[best_rel]) < 12.0:
+            continue
+
+        best_x = x_from + best_rel
+        target_x = min(edge_x + 36, best_x)
+        if target_x > edge_x:
+            add[y, edge_x:target_x + 1] = 255
+            outer_pts.append((target_x, y))
+
+    roi = np.zeros_like(mask, dtype=np.uint8)
+    cv2.rectangle(
+        roi,
+        (max(0, int(tip[0]) - 92), max(0, tip_y - 74)),
+        (min(mask.shape[1] - 1, int(tip[0]) + 100), tip_y),
+        255,
+        thickness=cv2.FILLED,
+    )
+    add = cv2.bitwise_and(add, roi)
+    add = cv2.bitwise_and(add, cv2.bitwise_not(mask))
+    add = remove_small_components(add, min_area=4)
+
+    # Keep only the added patch that remains attached to the existing flank.
+    touch = cv2.dilate(mask, np.ones((3, 3), np.uint8), iterations=1)
+    add = cv2.bitwise_and(add, touch)
+
+    # After we recover sparse row-wise support, explicitly fill the wedge
+    # between those recovered outer points and the visible right flank so the
+    # whole clipped corner comes back, not just a few scanlines.
+    if len(outer_pts) >= 8:
+        right_seg = right_arc[(right_arc[:, 1] >= y_top) & (right_arc[:, 1] <= tip_y)]
+        right_seg = right_seg[np.argsort(right_seg[:, 1])]
+
+        outer = np.array(outer_pts, dtype=np.int32)
+        ys_unique = np.unique(outer[:, 1])
+        outer_reduced = []
+        for yy in ys_unique:
+            xs = outer[outer[:, 1] == yy, 0]
+            outer_reduced.append([int(xs.max()), int(yy)])
+        outer = np.array(outer_reduced, dtype=np.int32)
+        outer = outer[np.argsort(outer[:, 1])[::-1]]
+
+        if len(right_seg) >= 6 and len(outer) >= 6:
+            poly = np.vstack([right_seg, outer]).reshape(-1, 1, 2)
+            wedge = np.zeros_like(mask, dtype=np.uint8)
+            cv2.fillPoly(wedge, [poly], 255)
+            wedge = cv2.bitwise_and(wedge, roi)
+            wedge = cv2.bitwise_and(wedge, cv2.bitwise_not(mask))
+            add = cv2.bitwise_or(add, wedge)
+
+    if cv2.countNonZero(add) == 0:
+        return mask
+
+    out = cv2.bitwise_or(mask, add)
+    out = trim_tail_corner_right_bumps(
+        base_mask=mask,
+        recovered_mask=out,
+        tip_x=int(tip[0]),
+        tip_y=tip_y,
+    )
+    out = keep_largest_connected_component(out)
+    out = fill_mask_holes(out)
+    return out
+
+
+def recover_tail_corner_fitline_gap(
+    mask: np.ndarray,
+    contour_pts: np.ndarray,
+    tip_y: int,
+    anchor_x: int,
+    roi: np.ndarray,
+) -> np.ndarray:
+    """
+    Recover a clipped tail-corner flank by fitting short lines to the contour
+    on each side of the bottom tip, then filling the gap between the current
+    edge and the stronger fitted flank. This targets the missing side only.
+    """
+    if mask is None or contour_pts is None or len(contour_pts) < 20 or roi is None:
+        return np.zeros_like(mask, dtype=np.uint8)
+
+    n = len(contour_pts)
+    tip_candidates = np.where(contour_pts[:, 1] == int(tip_y))[0]
+    if len(tip_candidates) > 0:
+        tip_idx = int(tip_candidates[np.argmin(np.abs(contour_pts[tip_candidates, 0] - int(anchor_x)))])
+    else:
+        tip_idx = int(np.argmax(contour_pts[:, 1]))
+
+    def circular_segment(start_idx: int, end_idx: int) -> np.ndarray:
+        seg = []
+        i = int(start_idx) % n
+        end_idx = int(end_idx) % n
+        for _ in range(n + 1):
+            seg.append(contour_pts[i])
+            if i == end_idx:
+                break
+            i = (i + 1) % n
+        return np.array(seg, dtype=np.int32)
+
+    forward_arc = circular_segment(tip_idx, tip_idx + 56)
+    backward_arc = circular_segment(tip_idx - 56, tip_idx)
+
+    # Label the two arcs by side, then build one candidate gap per side.
+    arcs = []
+    if len(forward_arc) >= 6:
+        arcs.append((forward_arc, +1 if float(np.mean(forward_arc[:, 0])) >= float(anchor_x) else -1))
+    if len(backward_arc) >= 6:
+        arcs.append((backward_arc, +1 if float(np.mean(backward_arc[:, 0])) >= float(anchor_x) else -1))
+
+    best_gap = np.zeros_like(mask, dtype=np.uint8)
+    best_area = 0
+    fit_skip = 3
+    fit_count = 22
+    y_band = 30
+    max_offset_px = 12
+
+    for arc, sign in arcs:
+        fit_pts = arc[fit_skip:min(len(arc), fit_skip + fit_count)].astype(np.float32)
+        if len(fit_pts) < 6:
+            continue
+
+        vx, vy, x0, y0 = [float(v) for v in cv2.fitLine(
+            fit_pts.reshape(-1, 1, 2),
+            cv2.DIST_L2,
+            0,
+            0.01,
+            0.01
+        ).reshape(-1)]
+        if abs(vy) < 1e-4:
+            continue
+
+        candidate = np.zeros_like(mask, dtype=np.uint8)
+        y_top = max(0, int(tip_y) - y_band)
+        for y in range(y_top, int(tip_y) + 1):
+            row_mask = (mask[y] > 0) & (roi[y] > 0)
+            if not np.any(row_mask):
+                continue
+
+            xs_row = np.where(row_mask)[0]
+            edge_x = int(xs_row.max()) if sign > 0 else int(xs_row.min())
+            fit_x = int(round(x0 + (y - y0) * (vx / vy)))
+
+            if sign > 0:
+                target = min(edge_x + max_offset_px, fit_x)
+                if target > edge_x:
+                    candidate[y, edge_x:target + 1] = 255
+            else:
+                target = max(edge_x - max_offset_px, fit_x)
+                if target < edge_x:
+                    candidate[y, target:edge_x + 1] = 255
+
+        candidate = cv2.bitwise_and(candidate, roi)
+        candidate = cv2.bitwise_and(candidate, cv2.bitwise_not(mask))
+        candidate = remove_small_components(candidate, min_area=4)
+        area = int(cv2.countNonZero(candidate))
+        if area > best_area:
+            best_gap = candidate
+            best_area = area
+
+    return best_gap
+
+
+def fill_tail_corner_local_hull(mask: np.ndarray) -> np.ndarray:
+    """
+    Fill a tiny missing tail corner using only the local tail-tip geometry.
+    The fill is clipped to the current tip height so it broadens the corner
+    instead of lengthening the tail.
+    """
+    if (not TAIL_CORNER_FILL_ENABLE) or mask is None or cv2.countNonZero(mask) == 0:
+        return mask
+
+    contour = contour_from_mask(mask)
+    if contour is None or len(contour) < 20:
+        return mask
+
+    pts = contour[:, 0, :].astype(np.int32)
+    tip_y = int(np.max(pts[:, 1]))
+    band_px = int(max(6, TAIL_CORNER_FILL_BOTTOM_BAND_PX))
+    bottom_pts = pts[pts[:, 1] >= (tip_y - band_px)]
+    if len(bottom_pts) == 0:
+        return mask
+
+    anchor_x = int(np.median(bottom_pts[:, 0]))
+
+    roi = np.zeros_like(mask, dtype=np.uint8)
+    half_w = int(max(18, TAIL_CORNER_FILL_HALF_W_PX))
+    up_px = int(max(18, TAIL_CORNER_FILL_UP_PX))
+    cv2.rectangle(
+        roi,
+        (max(0, anchor_x - half_w), max(0, tip_y - up_px)),
+        (min(mask.shape[1] - 1, anchor_x + half_w), tip_y),
+        255,
+        thickness=cv2.FILLED,
+    )
+
+    corner_roi = _tail_corner_roi(mask)
+    if corner_roi is not None:
+        corner_roi = _dilate_mask(corner_roi, TAIL_CORNER_FILL_ROI_DILATE_PX)
+        if corner_roi is not None:
+            roi = cv2.bitwise_and(roi, corner_roi)
+
+    if cv2.countNonZero(roi) == 0:
+        return mask
+
+    local = cv2.bitwise_and(mask, roi)
+    cnts, _ = cv2.findContours(local, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cnts:
+        return mask
+
+    hull = cv2.convexHull(np.concatenate(cnts, axis=0))
+    hull_mask = contour_to_filled_mask(mask.shape[0], mask.shape[1], hull)
+    hull_mask = cv2.bitwise_and(hull_mask, roi)
+
+    fitline_gap = recover_tail_corner_fitline_gap(
+        mask=mask,
+        contour_pts=pts,
+        tip_y=tip_y,
+        anchor_x=anchor_x,
+        roi=roi,
+    )
+    hull_mask = cv2.bitwise_or(hull_mask, fitline_gap)
+
+    addition = cv2.bitwise_and(hull_mask, cv2.bitwise_not(mask))
+    if cv2.countNonZero(addition) == 0:
+        return mask
+    if cv2.countNonZero(addition) > int(max(20, TAIL_CORNER_FILL_MAX_ADD_PX)):
+        return mask
+
+    out = cv2.bitwise_or(mask, addition)
+    out = keep_largest_connected_component(out)
+    out = fill_mask_holes(out)
+    return out
 
 def compute_final_fish_mask(img_rgb: np.ndarray, img_rgba: np.ndarray | None) -> np.ndarray:
     h, w = img_rgb.shape[:2]
@@ -1280,6 +2074,11 @@ def index():
         if LOCAL_MASK_REFINE_ENABLE:
             fish_mask_full = local_band_refine_mask(img_rgb_full, fish_mask_full)
 
+        fish_mask_full = recover_tail_corner_hull(img_rgb_full, fish_mask_full)
+
+        fish_mask_full = keep_largest_connected_component(fish_mask_full)
+        fish_mask_full = fill_mask_holes(fish_mask_full)
+
         if BOUNDARY_SMOOTH_ENABLE:
             fish_mask_full = smooth_mask_boundary(
                 fish_mask_full, k=BOUNDARY_SMOOTH_K, iters=BOUNDARY_SMOOTH_ITERS
@@ -1301,10 +2100,16 @@ def index():
         fish_mask_full = keep_largest_connected_component(fish_mask_full)
         fish_mask_full = fill_mask_holes(fish_mask_full)
 
+        fish_mask_full = recover_tail_corner_right_flank_from_image(
+            img_rgb=img_rgb_full,
+            mask=fish_mask_full,
+        )
+        fish_mask_full = keep_largest_connected_component(fish_mask_full)
+        fish_mask_full = fill_mask_holes(fish_mask_full)
+
         best_contour = contour_from_mask(fish_mask_full)
 
-        # Smooth the final contour unconditionally so the displayed outline
-        # is continuous and less bumpy.
+        # Smooth the final contour so the displayed outline is continuous.
         if best_contour is not None and OUTLINE_SMOOTH_ENABLE:
             best_contour = smooth_contour_highres(
                 best_contour,
@@ -1319,6 +2124,11 @@ def index():
             )
             fish_mask_display = keep_largest_connected_component(fish_mask_display)
             fish_mask_display = fill_mask_holes(fish_mask_display)
+            fish_mask_display = recover_tail_corner_right_flank_from_image(
+                img_rgb=img_rgb_full,
+                mask=fish_mask_display,
+            )
+            best_contour = contour_from_mask(fish_mask_display)
         else:
             fish_mask_display = fish_mask_full
 
